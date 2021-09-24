@@ -12,3 +12,7 @@ CloudFormation templates to deploy NAT instances inside an existing VPC.
 The following diagram helps to illustrate what is deployed.
 
 ![Diagram](./template.png)
+
+Flow of traffic
+
+![Data flow](./dataflow.png)
