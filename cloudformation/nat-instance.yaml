@@ -1,0 +1,338 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: NAT Instance Template
+
+Parameters:
+
+  Environment:
+    Description: The environment this template will be deployed in. e.g. production
+    Type: String
+    Default: development
+
+  VPC:
+    Description: The VPC that this NAT instance will be deployed in
+    Type: AWS::EC2::VPC::Id
+
+  PublicSubnet:
+    Description: The Public Subnet that this NAT instance will be deployed in
+    Type: AWS::EC2::Subnet::Id
+
+  PrivateSubnet:
+    Description: The Private Subnet that this NAT instance will recieve traffic from
+    Type: AWS::EC2::Subnet::Id
+
+  AvailabilityZone:
+    Description: The Availability Zone that these subnets exist in
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  NatInstanceAmi:
+    Description: AMI used for the NAT Instance (defaults to Amazon Linux 2)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2
+
+  NatInstanceType:
+    Description: Instance Type used for NAT Instance (defaults to t4g.nano)
+    Type: String
+    Default: t4g.nano
+
+  NatInstanceSpot:
+    Description: Use spot pricing for NAT Instance (defaults to false)
+    Type: String
+    Default: 'false'
+
+  NatInstanceSpotPrice:
+    Description: Maximum spot pricing for NAT Instance (see current spot instance pricing https://aws.amazon.com/ec2/spot/pricing/)
+    Type: Number
+    Default: 0.0010
+
+Conditions:
+  # If NatInstanceSpot equals true, we are using spot instances
+  UseSpot: !Equals [!Ref NatInstanceSpot, 'true']
+
+Resources:
+
+  #######################
+  # NAT Security Groups #
+  #######################
+  # two security groups are created to allow communication between
+  # the NAT instance and private subnet resources
+  #
+  # NatSecurityGroup will be attached to the NAT Instance and allow ingress
+  # from the NatAccessGroup
+  #
+  # NatAccessGroup should then be attached to resources in the private subnet and
+  # allow egress traffic to NatSecurityGroup
+  #
+  # Ingress and Egress rules are defined for HTTP, HTTPS, DNS and NTP
+
+  NatAccessGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Access to internet via NAT instance
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${PublicSubnet}-nat-access-group
+        - Key: Environment
+          Value: !Ref Environment
+
+  NatSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Access From NAT Access Group
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${PublicSubnet}-nat-security-group
+        - Key: Environment
+          Value: !Ref Environment
+
+  NatAccessGroupEgressTCP80:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NatAccessGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      DestinationSecurityGroupId: !Ref NatSecurityGroup
+
+  NatAccessGroupEgressTCP443:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NatAccessGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref NatSecurityGroup
+
+  NatAccessGroupEgressTCP53:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NatAccessGroup
+      IpProtocol: tcp
+      FromPort: 53
+      ToPort: 53
+      DestinationSecurityGroupId: !Ref NatSecurityGroup
+
+  NatAccessGroupEgressUDP53:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NatAccessGroup
+      IpProtocol: udp
+      FromPort: 53
+      ToPort: 53
+      DestinationSecurityGroupId: !Ref NatSecurityGroup
+
+  NatAccessGroupEgressUDP123:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref NatAccessGroup
+      IpProtocol: udp
+      FromPort: 123
+      ToPort: 123
+      DestinationSecurityGroupId: !Ref NatSecurityGroup
+
+  NatSecurityGroupIngressTCP80:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NatSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref NatAccessGroup
+
+  NatSecurityGroupIngressTCP443:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NatSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref NatAccessGroup
+
+  NatSecurityGroupIngressTCP53:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NatSecurityGroup
+      IpProtocol: tcp
+      FromPort: 53
+      ToPort: 53
+      SourceSecurityGroupId: !Ref NatAccessGroup
+
+  NatSecurityGroupIngressUDP53:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NatSecurityGroup
+      IpProtocol: udp
+      FromPort: 53
+      ToPort: 53
+      SourceSecurityGroupId: !Ref NatAccessGroup
+
+  NatSecurityGroupIngressUDP123:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NatSecurityGroup
+      IpProtocol: udp
+      FromPort: 123
+      ToPort: 123
+      SourceSecurityGroupId: !Ref NatAccessGroup
+
+  #####################
+  # NAT Instance Role #
+  #####################
+  # IAM Role that will be attached to our NAT instance.
+  # We have attached the service policy for SSM to allow management
+  # and patching of the resource in future
+
+  NatInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${PublicSubnet}-nat-instance-role
+        - Key: Environment
+          Value: !Ref Environment
+  NatInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NatInstanceRole
+
+  #########################
+  # NAT Network Interface #
+  #########################
+  # network interface deployed to give our VPC Route something
+  # to send traffic to
+  # our auto scaling group and launch template will provision a NAT
+  # instance with this network interface attached.
+
+  NatNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Sub Network Interface for Nat Instance in ${PublicSubnet}
+      SourceDestCheck: false
+      SubnetId: !Ref PublicSubnet
+      GroupSet:
+        - !Ref NatSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${PublicSubnet}-nat-instance-network-interface
+        - Key: Environment
+          Value: !Ref Environment
+
+  ######################
+  # NAT Private Routes #
+  ######################
+  # routing set up that will send traffic from our
+  # private subnet through the NAT instance
+  #
+  # This includes a Table, a Route on that Table and an Association
+  # between the Table and the Private Subnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref PrivateRouteTable
+      NetworkInterfaceId: !Ref NatNetworkInterface
+
+  PrivateRouteSubnetAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  ################################
+  # NAT Instance Launch Template #
+  ################################
+  # launch template defines the properties of our nat instance, such as
+  # AMI, IAM Role, Network Interface and User Data to execute @ first boot
+  #
+  # If spot instance condition is true, set market options
+
+  NatInstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref NatInstanceType
+        CreditSpecification:
+          CpuCredits: standard
+        ImageId: !Ref NatInstanceAmi
+        Monitoring:
+          Enabled: false
+        IamInstanceProfile:
+          Arn: !GetAtt NatInstanceProfile.Arn
+        NetworkInterfaces:
+          - NetworkInterfaceId: !Ref NatNetworkInterface
+            DeviceIndex: 0
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeType: gp3
+        InstanceMarketOptions:
+          Fn::If:
+            - UseSpot
+            - MarketType: spot
+              SpotOptions:
+                MaxPrice: !Ref NatInstanceSpotPrice
+                SpotInstanceType: one-time
+            - !Ref 'AWS::NoValue'
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash -xe
+            sysctl -q -w net.ipv4.ip_forward=1
+            sysctl -q -w net.ipv4.conf.eth0.send_redirects=0
+            iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            iptables-save > /etc/sysconfig/iptables
+            echo $'#!/bin/bash\necho Restoring IPTables\niptables-restore < /etc/sysconfig/iptables' > /etc/cron.hourly/iptable-restore
+            chmod +x /etc/cron.hourly/iptable-restore
+            systemctl enable amazon-ssm-agent
+            systemctl restart amazon-ssm-agent
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+            - Key: Name
+              Value: !Sub ${Environment}-${PublicSubnet}-nat-instance
+            - Key: Environment
+              Value: !Ref Environment
+
+  ##########################
+  # NAT Auto Scaling Group #
+  ##########################
+  # Deploy an Auto Scaling Group,
+  # to provision a max of 1 NAT instance in the target subnet
+  # this will also recreate the instance if it is terminated
+
+  NatInstanceAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones:
+        - !Ref AvailabilityZone
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NatInstanceLaunchTemplate
+        Version: !GetAtt NatInstanceLaunchTemplate.LatestVersionNumber
+      MinSize: '0'
+      MaxSize: '1'
+      DesiredCapacity: '1'
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-${PublicSubnet}-nat-instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
